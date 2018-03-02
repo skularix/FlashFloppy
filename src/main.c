@@ -9,6 +9,8 @@
  * See the file COPYING for more details, or visit <http://unlicense.org>.
  */
 
+#include "fatfs/diskio.h"
+
 int EXC_reset(void) __attribute__((alias("main")));
 
 static FATFS fatfs;
@@ -1247,6 +1249,31 @@ static int run_floppy(void *_b)
     return 0;
 }
 
+static uint32_t _perftest(unsigned int nsec)
+{
+    uint32_t base_sec = (5*1024*1024*2)+7;
+    uint32_t sec = base_sec;
+    stk_time_t t;
+    int i, N=10;
+
+    t = stk_now();
+    for (i = 0; i < N; i++) {
+        disk_write(0, (void *)fs->buf, sec, nsec);
+        sec += nsec;
+    }
+    return stk_diff(t, stk_now()) / stk_us(N);
+}
+
+static void perftest(void)
+{
+    int i = 1;
+    uint32_t t;
+    do {
+        t = _perftest(i);
+        printk("%u sector: %u us (%u)\n", i, t/i, t);
+    } while ((i <<= 1) < 32);
+}
+
 static int floppy_main(void *unused)
 {
     FRESULT fres;
@@ -1261,6 +1288,8 @@ static int floppy_main(void *unused)
 
     arena_init();
     fs = arena_alloc(sizeof(*fs));
+
+    perftest();
     
     cfg_init();
     cfg_update(CFG_READ_SLOT_NR);
