@@ -155,8 +155,8 @@ static void hfe_setup_track(
     } else {
         /* Write mode. */
         im->hfe.trk_pos = im->cur_bc / 8;
-        im->hfe.write_batch.len = 0;
-        im->hfe.write_batch.dirty = FALSE;
+        memset(im->hfe.write_batch, 0, sizeof(im->hfe.write_batch));
+        im->hfe.write_batch_idx = 0;
     }
 }
 
@@ -270,13 +270,19 @@ static bool_t hfe_write_track(struct image *im)
     const unsigned int batch_secs = 8;
     bool_t flush;
     struct write *write = get_write(im, im->wr_cons);
+    struct hfe_write_batch *wb;
     struct image_buf *wr = &im->bufs.write_bc;
     uint8_t *buf = wr->p;
     unsigned int bufmask = wr->len - 1;
-    uint8_t *w, *wrbuf = im->bufs.write_data.p;
+    uint8_t *w, *wrbuf;
     uint32_t i, space, c = wr->cons / 8, p = wr->prod / 8;
-    bool_t writeback = FALSE;
+    enum { WB_no = 0, WB_partial, WB_complete } writeback = WB_no;
     time_t t;
+
+    /* Locate current write-batch buffer. */
+    wb = &im->hfe.write_batch[im->hfe.write_batch_idx];
+    wrbuf = im->bufs.write_data.p;
+    wrbuf += im->hfe.write_batch_idx * batch_secs * 512;
 
     /* If we are processing final data then use the end index, rounded to
      * nearest. */
@@ -285,15 +291,14 @@ static bool_t hfe_write_track(struct image *im)
     if (flush)
         p = (write->bc_end + 4) / 8;
 
-    if (im->hfe.write_batch.len == 0) {
-        ASSERT(!im->hfe.write_batch.dirty);
-        im->hfe.write_batch.off = (im->hfe.trk_pos & ~255) << 1;
-        im->hfe.write_batch.len = min_t(
-            uint16_t, batch_secs * 512,
-            (((im->hfe.trk_len * 2) + 511) & ~511) - im->hfe.write_batch.off);
-        F_lseek(&im->fp, im->hfe.trk_off * 512 + im->hfe.write_batch.off);
-        F_read(&im->fp, wrbuf, im->hfe.write_batch.len, NULL);
-        F_lseek(&im->fp, im->hfe.trk_off * 512 + im->hfe.write_batch.off);
+    if (wb->len == 0) {
+        wb->dirty_start = wb->dirty_end = im->hfe.trk_pos;
+        wb->off = (im->hfe.trk_pos & ~255) << 1;
+        wb->len = min_t(uint16_t, batch_secs * 512,
+                        (((im->hfe.trk_len * 2) + 511) & ~511) - wb->off);
+        F_lseek(&im->fp, im->hfe.trk_off * 512 + wb->off);
+        F_read(&im->fp, wrbuf, wb->len, NULL);
+        F_lseek(&im->fp, im->hfe.trk_off * 512 + wb->off);
     }
 
     for (;;) {
@@ -314,21 +319,19 @@ static bool_t hfe_write_track(struct image *im)
 
         /* Bail if required data not in the write buffer. */
         batch_off = (off & ~255) << 1; 
-        if ((batch_off < im->hfe.write_batch.off)
-            || (batch_off >= (im->hfe.write_batch.off
-                              + im->hfe.write_batch.len))) {
-            writeback = TRUE;
+        if ((batch_off < wb->off) || (batch_off >= (wb->off + wb->len))) {
+            writeback = WB_complete;
             break;
         }
 
         /* Encode into the sector buffer for later write-out. */
         w = wrbuf
             + (im->cur_track & 1) * 256
-            + batch_off - im->hfe.write_batch.off
+            + batch_off - wb->off
             + (off & 255);
         for (i = 0; i < nr; i++)
             *w++ = _rbit32(buf[c++ & bufmask]) >> 24;
-        im->hfe.write_batch.dirty = TRUE;
+        wb->dirty_end = off + nr;
 
         im->hfe.trk_pos += nr;
         if (im->hfe.trk_pos >= im->hfe.trk_len) {
@@ -342,19 +345,57 @@ static bool_t hfe_write_track(struct image *im)
         flush = FALSE;
     } else if (flush) {
         /* If this is the final call, we should do writeback. */
-        writeback = TRUE;
+        writeback = WB_complete;
     }
 
-    if (writeback && im->hfe.write_batch.dirty) {
-        t = time_now();
-        printk("Write %u-%u (%u)... ",
-               im->hfe.write_batch.off,
-               im->hfe.write_batch.off + im->hfe.write_batch.len - 1,
-               im->hfe.write_batch.len);
-        F_write(&im->fp, wrbuf, im->hfe.write_batch.len, NULL);
-        printk("%u us\n", time_diff(t, time_now()) / TIME_MHZ);
-        im->hfe.write_batch.len = 0;
-        im->hfe.write_batch.dirty = FALSE;
+    /* If we aren't yet ready for writeback of the old buffer, prefetch 
+     * the next while we wait for more bitcell data. */
+    if (!writeback) {
+        unsigned int nidx = !im->hfe.write_batch_idx;
+        struct hfe_write_batch *nwb = &im->hfe.write_batch[nidx];
+        if (nwb->len == 0) {
+            unsigned int fpos = f_tell(&im->fp);
+            uint8_t *nwrbuf = im->bufs.write_data.p;
+            nwrbuf += nidx * batch_secs * 512;
+            nwb->off = wb->off + wb->len;
+            nwb->len = min_t(uint16_t, batch_secs * 512,
+                            (((im->hfe.trk_len * 2) + 511) & ~511) - nwb->off);
+            if (nwb->len == 0) {
+                nwb->off = 0;
+                nwb->len = min_t(uint16_t, batch_secs * 512,
+                                 ((im->hfe.trk_len * 2) + 511) & ~511);
+            }
+            nwb->dirty_start = nwb->dirty_end = nwb->off >> 1;
+            F_lseek(&im->fp, im->hfe.trk_off * 512 + nwb->off);
+            F_read(&im->fp, nwrbuf, nwb->len, NULL);
+            F_lseek(&im->fp, fpos);
+        } else {
+            writeback = WB_partial;
+        }
+    }
+
+    if (writeback) {
+        uint32_t wr_s = (wb->dirty_start & ~255) << 1;
+        uint32_t wr_e = (wb->dirty_end & ~255) << 1;
+        if (wb->dirty_end == im->hfe.trk_len)
+            writeback = WB_complete;
+        if (writeback == WB_complete)
+            wr_e = ((wb->dirty_end + 255) & ~255) << 1;
+        if (wr_e != wr_s) {
+            t = time_now();
+            printk("Write %u-%u (%u)... ", wr_s, wr_e - 1, wr_e - wr_s);
+            F_write(&im->fp, &wrbuf[wr_s - wb->off], wr_e - wr_s, NULL);
+            printk("%u us\n", time_diff(t, time_now()) / TIME_MHZ);
+            wb->dirty_start = wb->dirty_end & ~255;
+        }
+        if (writeback == WB_complete) {
+            unsigned int nidx = !im->hfe.write_batch_idx;
+            struct hfe_write_batch *nwb = &im->hfe.write_batch[nidx];
+            wb->len = 0;
+            im->hfe.write_batch_idx = nidx;
+            if (nwb->len != 0)
+                F_lseek(&im->fp, im->hfe.trk_off * 512 + nwb->off);
+        }
     }
 
     wr->cons = c * 8;

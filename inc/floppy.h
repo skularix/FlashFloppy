@@ -28,10 +28,11 @@ struct hfe_image {
     uint16_t trk_pos, trk_len;
     bool_t is_v3;
     uint8_t batch_secs;
-    struct {
+    uint8_t write_batch_idx;
+    struct hfe_write_batch {
         uint16_t off, len;
-        bool_t dirty;
-    } write_batch;
+        uint16_t dirty_start, dirty_end;
+    } write_batch[2];
 };
 
 struct img_image {
