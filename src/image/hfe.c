@@ -157,6 +157,7 @@ static void hfe_setup_track(
         im->hfe.trk_pos = im->cur_bc / 8;
         im->hfe.write_batch.len = 0;
         im->hfe.write_batch.dirty = FALSE;
+        im->hfe.write_started = FALSE;
     }
 }
 
@@ -300,6 +301,16 @@ static bool_t hfe_write_track(struct image *im)
 
         uint32_t batch_off, off = im->hfe.trk_pos;
         UINT nr;
+
+        if (!im->hfe.write_started) {
+            while (c != p) {
+                if (buf[c & bufmask] >= 0x55) {
+                    im->hfe.write_started = TRUE;
+                    break;
+                }
+                c++;
+            }
+        }
 
         /* All bytes remaining in the raw-bitcell buffer. */
         nr = space = (p - c) & bufmask;
