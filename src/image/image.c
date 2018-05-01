@@ -10,6 +10,7 @@
  */
 
 extern const struct image_handler adf_image_handler;
+extern const struct image_handler eadf_image_handler;
 extern const struct image_handler hfe_image_handler;
 extern const struct image_handler img_image_handler;
 extern const struct image_handler st_image_handler;
@@ -34,22 +35,21 @@ bool_t image_valid(FILINFO *fp)
 
     /* Check valid extension. */
     filename_extension(fp->fname, ext, sizeof(ext));
-    if (!strcmp(ext, "adf")) {
-        return (ff_cfg.host == HOST_acorn) || !(fp->fsize % (11*512));
-    } else if (!strcmp(ext, "dsk")
-               || !strcmp(ext, "hfe")
-               || !strcmp(ext, "img")
-               || !strcmp(ext, "ima")
-               || !strcmp(ext, "st")
-               || !strcmp(ext, "adl")
-               || !strcmp(ext, "adm")
-               || !strcmp(ext, "mgt")
-               || !strcmp(ext, "trd")
-               || !strcmp(ext, "opd")
-               || !strcmp(ext, "ssd")
-               || !strcmp(ext, "dsd")
-               || !strcmp(ext, "sdu")
-               || !strcmp(ext, "v9t9")) {
+    if (!strcmp(ext, "adf")
+        || !strcmp(ext, "dsk")
+        || !strcmp(ext, "hfe")
+        || !strcmp(ext, "img")
+        || !strcmp(ext, "ima")
+        || !strcmp(ext, "st")
+        || !strcmp(ext, "adl")
+        || !strcmp(ext, "adm")
+        || !strcmp(ext, "mgt")
+        || !strcmp(ext, "trd")
+        || !strcmp(ext, "opd")
+        || !strcmp(ext, "ssd")
+        || !strcmp(ext, "dsd")
+        || !strcmp(ext, "sdu")
+        || !strcmp(ext, "v9t9")) {
         return TRUE;
     }
 
@@ -88,6 +88,7 @@ void image_open(struct image *im, const struct slot *slot)
         /* Formats with an identifying header. */
         &dsk_image_handler,
         &hfe_image_handler,
+        &eadf_image_handler,
         /* Header-less formats in some semblance of priority order. */
         &adf_image_handler,
         &img_image_handler
@@ -103,7 +104,7 @@ void image_open(struct image *im, const struct slot *slot)
 
     /* Use the extension as a hint to the correct image handler. */
     hint = (!strcmp(ext, "adf") ? ((ff_cfg.host == HOST_acorn)
-                                   ? &adfs_image_handler : &adf_image_handler)
+                                   ? &adfs_image_handler : &eadf_image_handler)
             : !strcmp(ext, "dsk") ? &dsk_image_handler
             : !strcmp(ext, "hfe") ? &hfe_image_handler
             : !strcmp(ext, "img") ? &img_image_handler
@@ -123,7 +124,10 @@ void image_open(struct image *im, const struct slot *slot)
         if (try_handler(im, slot, hint))
             return;
         /* Hint failed. Try a secondary hint (allows DSK fallback to IMG). */
-        hint = !strcmp(ext, "dsk") ? &img_image_handler : NULL;
+        hint = !strcmp(ext, "dsk") ? &img_image_handler
+            : (!strcmp(ext, "adf")
+               && (ff_cfg.host != HOST_acorn)) ? &adf_image_handler
+            : NULL;
         if (hint && try_handler(im, slot, hint))
             return;
     }

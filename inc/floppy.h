@@ -25,6 +25,14 @@ struct adf_image {
     uint32_t nr_secs;
 };
 
+struct eadf_image {
+    uint32_t trk_off;
+    uint16_t trk_pos, trk_len;
+    int32_t decode_pos;
+    uint32_t pre_idx_gap_bc;
+    uint32_t nr_secs;
+};
+
 struct hfe_image {
     uint16_t tlut_base;
     uint16_t trk_off;
@@ -120,6 +128,7 @@ struct image {
 
     union {
         struct adf_image adf;
+        struct eadf_image eadf;
         struct hfe_image hfe;
         struct img_image img;
         struct dsk_image dsk;
