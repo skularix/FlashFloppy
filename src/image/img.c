@@ -75,6 +75,9 @@ const static struct img_type {
     { 16, 2, 57, 3, 1, 1, 0, _C(40) }, /* Type 03 */
     { 16, 2, 57, 3, 1, 1, 0, _C(80) }, /* Type 07 */
     { 0 }
+}, pc98_type[] = {
+    { 8, 2, 116, 1, 3, 1, 0, _C(80) },
+    { 0 }
 }, uknc_type[] = {
     { 10, 2, 38, 1, 2, 1, 0, _C(80) },
     { 0 }
@@ -187,6 +190,14 @@ static bool_t st_open(struct image *im)
 static bool_t mgt_open(struct image *im)
 {
     return _img_open(im, TRUE, img_type);
+}
+
+static bool_t pc98fdi_open(struct image *im)
+{
+    /* Skip 4096-byte header. */
+    im->img.base_off = 4096;
+    im->img.rpm = 360;
+    return _img_open(im, TRUE, pc98_type);
 }
 
 static bool_t trd_open(struct image *im)
@@ -472,6 +483,14 @@ const struct image_handler mgt_image_handler = {
     .write_track = img_write_track,
 };
 
+const struct image_handler pc98fdi_image_handler = {
+    .open = pc98fdi_open,
+    .setup_track = img_setup_track,
+    .read_track = img_read_track,
+    .rdata_flux = bc_rdata_flux,
+    .write_track = img_write_track,
+};
+
 const struct image_handler trd_image_handler = {
     .open = trd_open,
     .setup_track = img_setup_track,
@@ -639,9 +658,13 @@ static bool_t img_write_track(struct image *im)
 static bool_t mfm_open(struct image *im)
 {
     uint32_t tracklen;
+    unsigned int i;
 
+    im->img.rpm = im->img.rpm ?: 300;
     im->img.gap_2 = im->img.gap_2 ?: GAP_2;
     im->img.gap_4a = im->img.gap_4a ?: GAP_4A;
+
+    im->stk_per_rev = (stk_ms(200) * 300) / im->img.rpm;
 
     im->img.idx_sz = im->img.gap_4a;
     if (im->img.has_iam)
@@ -658,11 +681,13 @@ static bool_t mfm_open(struct image *im)
     tracklen *= 16;
 
     /* Infer the data rate and hence the standard track length. */
-    im->img.data_rate = (tracklen < 55000) ? 250 /* SD */
-        : (tracklen < 105000) ? 500 /* DD */
-        : (tracklen < 205000) ? 1000 /* HD */
-        : 2000; /* ED */
-    im->tracklen_bc = im->img.data_rate * 200;
+    for (i = 0; i < 3; i++) { /* SD=0, DD=1, HD=2, ED=3 */
+        uint32_t maxlen = (((50000u * 300) / im->img.rpm) << i) + 5000;
+        if (tracklen < maxlen)
+            break;
+    }
+    im->img.data_rate = 250u << i; /* SD=250, DD=500, HD=1000, ED=2000 */
+    im->tracklen_bc = (im->img.data_rate * 200 * 300) / im->img.rpm;
 
     /* Does the track data fit within standard track length? */
     if (im->tracklen_bc < tracklen) {
@@ -685,6 +710,8 @@ static bool_t mfm_open(struct image *im)
     im->img.gap_4 = (im->tracklen_bc - tracklen) / 16;
 
     im->write_bc_ticks = sysclk_ms(1) / im->img.data_rate;
+
+    im->sync = SYNC_mfm;
 
     return TRUE;
 }
@@ -920,8 +947,11 @@ static bool_t fm_open(struct image *im)
 {
     uint32_t tracklen;
 
+    im->img.rpm = im->img.rpm ?: 300;
     im->img.gap_2 = im->img.gap_2 ?: FM_GAP_2;
     im->img.gap_4a = im->img.gap_4a ?: FM_GAP_4A;
+
+    im->stk_per_rev = (stk_ms(200) * 300) / im->img.rpm;
 
     im->img.idx_sz = im->img.gap_4a;
     im->img.idam_sz = FM_GAP_SYNC + 5 + 2 + im->img.gap_2;
@@ -932,9 +962,9 @@ static bool_t fm_open(struct image *im)
     tracklen += im->img.idx_sz;
     tracklen *= 16;
 
-    /* Infer the data rate and hence the standard track length. */
+    /* Data rate is always SD. */
     im->img.data_rate = 250; /* SD */
-    im->tracklen_bc = im->img.data_rate * 200;
+    im->tracklen_bc = (im->img.data_rate * 200 * 300) / im->img.rpm;
 
     ASSERT(im->tracklen_bc > tracklen);
 
